@@ -22,6 +22,7 @@ import {
 
 interface WakaBoxPluginSettings {
 	apiKey: string;
+	apiUrl: string; // API URLのカスタマイズを追加
 	updateIntervalMinutes: number;
 	enableDailyBatchMode: boolean;
 	batchUpdateHours: number;
@@ -30,6 +31,7 @@ interface WakaBoxPluginSettings {
 
 const DEFAULT_SETTINGS: WakaBoxPluginSettings = {
 	apiKey: "",
+	apiUrl: "https://wakatime.com/api/v1", // デフォルトのAPI URL
 	updateIntervalMinutes: 0,
 	enableDailyBatchMode: false,
 	batchUpdateHours: 0,
@@ -103,7 +105,7 @@ export default class WakaBoxPlugin extends Plugin {
 				: this.onFetchedSummary);
 
 		this.summaryFetcher.requestWakaTimeSummary(
-			this.settings.apiKey,
+			this.settings,
 			date,
 			true,
 			finalCallback
@@ -440,14 +442,20 @@ class SummaryDataFetcher {
 
 	// read cache or fetch data from wakatime
 	async requestWakaTimeSummary(
-		apiKey: String,
+		settings: WakaBoxPluginSettings,
 		date: string,
 		force: boolean,
 		callback: (summary: Summary | undefined, fromCache: boolean) => void
 	) {
-		const baseUrl = "https://wakatime.com/api/v1/users/current/summaries";
+		const baseUrl = this.getBaseUrl(settings) + "/users/current/summaries";
 		const url =
-			baseUrl + "?start=" + date + "&end=" + date + "&api_key=" + apiKey;
+			baseUrl +
+			"?start=" +
+			date +
+			"&end=" +
+			date +
+			"&api_key=" +
+			settings.apiKey;
 		try {
 			if (force) {
 				const result = await this.fetchViaAPI(url, date);
@@ -472,6 +480,13 @@ class SummaryDataFetcher {
 			);
 			callback(undefined, false);
 		}
+	}
+
+	private getBaseUrl(settings: WakaBoxPluginSettings) {
+		if (settings.apiUrl.trim() == "") {
+			return "https://wakatime.com/api/v1";
+		}
+		return settings.apiUrl;
 	}
 }
 
@@ -498,6 +513,19 @@ class WakaBoxSettingTab extends PluginSettingTab {
 					this.plugin.onGetAPIKey();
 				})
 		);
+
+		// 接続テストボタンを追加
+		new Setting(containerEl)
+			.setName("Test Connection")
+			.setDesc("Test the connection to the API server")
+			.addButton((button) =>
+				button.setButtonText("Test").onClick(async () => {
+					await this.testConnection();
+				})
+			);
+
+		// API URLのカスタマイズ設定を追加
+		this.createCustomUrlInputSetting(containerEl);
 
 		/* add for multi-devices */
 		new Setting(containerEl)
@@ -621,6 +649,88 @@ class WakaBoxSettingTab extends PluginSettingTab {
 					}
 				});
 			});
+	}
+
+	private createCustomUrlInputSetting(container: HTMLElement) {
+		// 既存のWakaTime URL Input欄を探す
+		let apiUrlSetting = container.querySelector(
+			".api-url-setting"
+		) as HTMLElement;
+
+		// 既存の要素がない場合、新規作成
+		if (!apiUrlSetting) {
+			apiUrlSetting = container.createDiv({ cls: "api-url-setting" });
+
+			new Setting(apiUrlSetting)
+				.setName("WakaTime API Url Input")
+				.setDesc(
+					'Enter your own Wakapi API url or other server, attention: "/api/compat/wakatime/v1" is required if you use your own Wakapi server'
+				)
+				.addText((text) =>
+					text
+						.setValue(this.plugin.settings.apiUrl)
+						.setPlaceholder(DEFAULT_SETTINGS.apiUrl)
+						.onChange(async (value) => {
+							this.plugin.settings.apiUrl = value;
+							await this.plugin.saveSettings();
+						})
+				)
+				.addExtraButton((button) => {
+					button
+						.setIcon("reset")
+						.setTooltip("Set WakaTime API Url to default")
+						.onClick(async () => {
+							this.plugin.settings.apiUrl =
+								DEFAULT_SETTINGS.apiUrl;
+							await this.plugin.saveSettings();
+							this.updateCustomUrlInput(apiUrlSetting);
+						});
+				})
+				.addExtraButton((button) => {
+					button
+						.setIcon("split")
+						.setTooltip("Set WakaTime API Url to Wakapi server")
+						.onClick(async () => {
+							this.plugin.settings.apiUrl =
+								"https://wakapi.dev/api/compat/wakatime/v1";
+							await this.plugin.saveSettings();
+							this.updateCustomUrlInput(apiUrlSetting);
+						});
+				});
+
+			container.appendChild(apiUrlSetting);
+		} else {
+			// 既存の要素がある場合、値を更新
+			this.updateCustomUrlInput(apiUrlSetting);
+		}
+	}
+
+	private updateCustomUrlInput(apiUrlSetting: HTMLElement) {
+		const input = apiUrlSetting.querySelector("input");
+		if (input) {
+			(input as HTMLInputElement).value = this.plugin.settings.apiUrl;
+		}
+	}
+
+	private async testConnection() {
+		const yesterday = moment().subtract(1, "days").format("YYYY-MM-DD");
+		const now = moment().format("YYYY-MM-DD");
+		const url =
+			this.plugin.settings.apiUrl +
+			`/users/current/summaries?start=${yesterday}&end=${now}&api_key=` +
+			this.plugin.settings.apiKey;
+		try {
+			await request(url);
+			new Notice("WakaTime box: connection test successful", 5000);
+		} catch (error) {
+			console.error(
+				"WakaTime box: error requesting WakaTime summary: " + error
+			);
+			new Notice(
+				"WakaTime box: error requesting WakaTime summary: " + error,
+				5000
+			);
+		}
 	}
 }
 
