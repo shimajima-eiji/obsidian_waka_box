@@ -1,16 +1,40 @@
-import { App, Notice, Plugin, PluginSettingTab, Setting, request, moment, TFile, normalizePath, Modal } from 'obsidian';
-import { Summary } from './model';
-import { appHasDailyNotesPluginLoaded, createDailyNote, getAllDailyNotes, getDailyNote } from "obsidian-daily-notes-interface";
+import {
+	App,
+	Notice,
+	Plugin,
+	PluginSettingTab,
+	Setting,
+	request,
+	moment,
+	TFile,
+	normalizePath,
+	Modal,
+} from "obsidian";
+import { Summary } from "./model";
+import {
+	appHasDailyNotesPluginLoaded,
+	createDailyNote,
+	getAllDailyNotes,
+	getDailyNote,
+} from "obsidian-daily-notes-interface";
 
 // Remember to rename these classes and interfaces!
 
 interface WakaBoxPluginSettings {
 	apiKey: string;
+	updateIntervalMinutes: number;
+	enableDailyBatchMode: boolean;
+	batchUpdateHours: number;
+	batchUpdateMinutes: number;
 }
 
 const DEFAULT_SETTINGS: WakaBoxPluginSettings = {
-	apiKey: ''
-}
+	apiKey: "",
+	updateIntervalMinutes: 0,
+	enableDailyBatchMode: false,
+	batchUpdateHours: 0,
+	batchUpdateMinutes: 0,
+};
 
 export default class WakaBoxPlugin extends Plugin {
 	settings: WakaBoxPluginSettings;
@@ -25,90 +49,190 @@ export default class WakaBoxPlugin extends Plugin {
 
 	onLayoutReady() {
 		if (!appHasDailyNotesPluginLoaded()) {
-			new Notice('WakaTime box: please enable daily notes plugin.', 5000);
+			new Notice("WakaTime box: please enable daily notes plugin.", 5000);
 		}
 		this.loadSettings().then(() => {
-			if (this.settings.apiKey.trim() == '') {
-				new Notice('WakaTime box: please enter your API key in the settings.', 5000);
+			if (this.settings.apiKey.trim() == "") {
+				new Notice(
+					"WakaTime box: please enter your API key in the settings.",
+					5000
+				);
 				return;
 			}
 			this.onGetAPIKey();
 		});
 	}
 
-	onGetAPIKey() {
-		if (this.settings.apiKey.trim() == '') {
+	// 共通処理を外部関数として抽出
+	private fetchSummaryData(
+		date: string,
+		userInput: boolean,
+		callback?: (summary: Summary | undefined, _: boolean) => void
+	) {
+		if (
+			this.summaryFetcher == undefined ||
+			this.settings.apiKey.trim() == ""
+		) {
+			new Notice(
+				"WakaTime box: please enter your API key in the settings.",
+				5000
+			);
 			return;
 		}
+
+		const finalCallback =
+			callback ??
+			(userInput
+				? (summary: Summary | undefined, _: boolean) => {
+						if (summary == undefined) {
+							console.warn(
+								"WakaTime box: no summary data received"
+							);
+							return;
+						}
+						const box = this.getBoxText(summary);
+						navigator.clipboard.writeText(box).then(() => {
+							new Notice(
+								"WakaTime box: " +
+									date +
+									" copied to clipboard",
+								3000
+							);
+						});
+				  }
+				: this.onFetchedSummary);
+
+		this.summaryFetcher.requestWakaTimeSummary(
+			this.settings.apiKey,
+			date,
+			true,
+			finalCallback
+		);
+	}
+
+	private registerCommand(id: string, name: string, callback: () => void) {
+		this.addCommand({ id, name, callback });
+	}
+
+	private validateAndFetchDate(input: string) {
+		try {
+			const date = moment(input, "YYYY-MM-DD", true);
+			if (!date.isValid()) {
+				new Notice(
+					"WakaTime box: Invalid date format. Use YYYY-MM-DD.",
+					5000
+				);
+				return;
+			}
+			this.fetchSummaryData(date.format("YYYY-MM-DD"), true);
+		} catch (e) {
+			new Notice(`WakaTime box: Failed due to ${e}`, 5000);
+		}
+	}
+
+	onGetAPIKey() {
+		if (this.settings.apiKey.trim() == "") {
+			return;
+		}
+
+		// コマンド登録
 		this.addCommand({
 			id: "refresh-today",
 			name: "Force refetch today's data",
 			callback: () => {
-				if (this.settings.apiKey.trim() == '') {
-					new Notice('WakaTime box: please enter your API key in the settings.', 5000);
-					return;
-				}
 				const date = moment().format("YYYY-MM-DD");
-				if (this.summaryFetcher != undefined) {
-					this.summaryFetcher.requestWakaTimeSummary(this.settings.apiKey, date, true, this.onFetchedSummary);
-				}
-			}
-		})
+				this.fetchSummaryData(date, false);
+			},
+		});
+
 		this.addCommand({
 			id: "refresh-yesterday",
 			name: "Force refetch yesterday's data",
 			callback: () => {
-				if (this.settings.apiKey.trim() == '') {
-					new Notice('WakaTime box: please enter your API key in the settings.', 5000);
-					return;
-				}
-				const date = moment().subtract(1, 'days').format("YYYY-MM-DD");
-				if (this.summaryFetcher != undefined) {
-					this.summaryFetcher.requestWakaTimeSummary(this.settings.apiKey, date, true, this.onFetchedSummary);
-				}
-			}
-		})
+				const date = moment().subtract(1, "days").format("YYYY-MM-DD");
+				this.fetchSummaryData(date, false);
+			},
+		});
+
 		this.addCommand({
 			id: "refresh-manual",
 			name: "Fetch specific date's data and copy to clipboard",
 			callback: () => {
-				if (this.settings.apiKey.trim() == '') {
-					new Notice('WakaTime box: please enter your API key in the settings.', 5000);
-					return;
-				}
 				new ManualModal(this.app, (result: string) => {
-					try {
-						const date = moment(result).format("YYYY-MM-DD");
-						if (this.summaryFetcher != undefined) {
-							this.summaryFetcher.requestWakaTimeSummary(this.settings.apiKey, date, true, (summary: Summary | undefined, _: boolean) => {
-								if (summary == undefined) {
-									console.warn("WakaTime box: no summary data received");
-									return;
-								}
-								const box = this.getBoxText(summary);
-								navigator.clipboard.writeText(box).then(() => {
-									new Notice("WakaTime box: " + date + " copied to clipboard", 3000);
-								});
-							});
-						}
-					} catch (e) {
-						new Notice(`WakaTime box: fail due to ${e}`, 5000);
-						return;
-					}
+					this.validateAndFetchDate(result);
 				}).open();
-			}
-		})
+			},
+		});
+
 		this.summaryFetcher = new SummaryDataFetcher(this.app);
-		// TODO fetch previous data if open a file from the same day
-		const date = moment().format("YYYY-MM-DD");
-		this.summaryFetcher.requestWakaTimeSummary(this.settings.apiKey, date, false, this.onFetchedSummary);
-		const interval = 60 * 60 * 1000;
-		this.registerInterval(window.setInterval(() => {
-			if (this.summaryFetcher != undefined) {
-				const date = moment().format("YYYY-MM-DD");
-				this.summaryFetcher.requestWakaTimeSummary(this.settings.apiKey, date, false, this.onFetchedSummary);
+
+		// ファイルを開いたときにデータを取得
+		const fetchSummaryDataFromOpenDailyNote = () => {
+			const activeFile = this.app.workspace.getActiveFile();
+			if (!activeFile) {
+				console.warn("WakaTime box: No active file found.");
+				return;
 			}
-		}, interval));
+
+			// デイリーノートの日付を取得
+			const dailyNotes = getAllDailyNotes();
+			const dailyNote = Object.values(dailyNotes).find(
+				(note) => note.path === activeFile.path
+			);
+
+			if (!dailyNote) {
+				console.warn("WakaTime box: Active file is not a daily note.");
+				return;
+			}
+
+			/**
+			 * ファイル名から日付を抽出
+			 * 以下の正規表現パターンに対応
+			 * m.d.y
+			 * yyyy年m月d日
+			 * yyyy_mm_dd
+			 * 令和元年1月1日
+			 */
+			const dateMatch = dailyNote.basename.match(
+				/\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}(日)?|[昭平成令\p{Script=Han}]{1,2}元?年\d{1,2}月\d{1,2}日|\d{1,2}[-_/]\d{1,2}[-_/]\d{4}/u
+			);
+			if (!dateMatch) {
+				console.warn(
+					"WakaTime box: Failed to extract date from daily note."
+				);
+				return;
+			}
+
+			const date = dateMatch[0];
+			this.fetchSummaryData(date, false);
+		};
+
+		// インターバルチェックの設定
+		const interval = 60 * 1000;
+		let intervalMinutesCounter = 0;
+
+		this.registerInterval(
+			window.setInterval(() => {
+				if (!this.settings.enableDailyBatchMode) {
+					if (
+						intervalMinutesCounter >=
+						this.settings.updateIntervalMinutes
+					) {
+						intervalMinutesCounter = 0;
+						fetchSummaryDataFromOpenDailyNote();
+					}
+					intervalMinutesCounter++;
+				} else {
+					const now = new Date();
+					if (
+						now.getHours() === this.settings.batchUpdateHours &&
+						now.getMinutes() === this.settings.batchUpdateMinutes
+					) {
+						fetchSummaryDataFromOpenDailyNote();
+					}
+				}
+			}, interval)
+		);
 	}
 
 	onunload() {
@@ -122,7 +246,7 @@ export default class WakaBoxPlugin extends Plugin {
 		}
 		const momentDate = moment.utc(summary.start).local();
 		const dailyNotes = getAllDailyNotes();
-		const dailyNode = getDailyNote(momentDate, dailyNotes)
+		const dailyNode = getDailyNote(momentDate, dailyNotes);
 		if (dailyNode == undefined) {
 			createDailyNote(momentDate).then((file) => {
 				this.processDailyNote(file, summary, fromCache);
@@ -131,12 +255,22 @@ export default class WakaBoxPlugin extends Plugin {
 			this.processDailyNote(dailyNode, summary, fromCache);
 		}
 		if (!fromCache) {
-			new Notice("WakaTime box: " + momentDate.format("YYYY-MM-DD") + " refreshed", 5000);
+			new Notice(
+				"WakaTime box: " +
+					momentDate.format("YYYY-MM-DD") +
+					" refreshed",
+				5000
+			);
 		}
-	}
+	};
 
 	processDailyNote(file: TFile, summary: Summary, fromCache: boolean) {
-		console.log("refreshing daily note. fromCache: " + fromCache + ", file: " + file.name);
+		console.log(
+			"refreshing daily note. fromCache: " +
+				fromCache +
+				", file: " +
+				file.name
+		);
 		this.app.vault.process(file, (data: string) => {
 			let box = this.getBoxText(summary);
 			const exists = data.includes("```wakatime");
@@ -178,7 +312,9 @@ export default class WakaBoxPlugin extends Plugin {
 			}
 			const name = language.name.padEnd(maxNameLength, " ");
 			const text = language.text.padEnd(maxTextLength, " ");
-			const percent = language.percent.toString().padStart(maxPercentLength, " ");
+			const percent = language.percent
+				.toString()
+				.padStart(maxPercentLength, " ");
 			const bar = this.generateBarChart(language.percent, 20);
 			const padding = " ".repeat(5);
 			const line = `${name}${padding}${text}${padding}${bar}${padding}${percent} %\n`;
@@ -198,23 +334,28 @@ export default class WakaBoxPlugin extends Plugin {
 		}
 		const semi = frac % 8;
 
-		return [syms.substring(8, 9).repeat(barsFull), syms.substring(semi, semi + 1)]
+		return [
+			syms.substring(8, 9).repeat(barsFull),
+			syms.substring(semi, semi + 1),
+		]
 			.join("")
 			.padEnd(size, syms.substring(0, 1));
 	}
 
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		this.settings = Object.assign(
+			{},
+			DEFAULT_SETTINGS,
+			await this.loadData()
+		);
 	}
 
 	async saveSettings() {
 		await this.saveData(this.settings);
 	}
-
 }
 
 class SummaryDataFetcher {
-
 	private app: App;
 	private cacheDir: String;
 
@@ -224,7 +365,9 @@ class SummaryDataFetcher {
 	}
 
 	async createCacheDir() {
-		const cacheDir = normalizePath(this.app.vault.configDir + "/" + ".waka_box_cache");
+		const cacheDir = normalizePath(
+			this.app.vault.configDir + "/" + ".waka_box_cache"
+		);
 		const exists = await this.app.vault.adapter.exists(cacheDir);
 		if (!exists) {
 			await this.app.vault.adapter.mkdir(cacheDir);
@@ -255,16 +398,23 @@ class SummaryDataFetcher {
 			const summary = JSON.parse(data) as Summary;
 			return summary;
 		} catch (e) {
-			console.error("WakaTime box: Error loading WakaTime summary from cache: " + e);
+			console.error(
+				"WakaTime box: Error loading WakaTime summary from cache: " + e
+			);
 		}
 		return undefined;
 	}
 
 	async saveToCache(cacheKey: String, summary: Summary) {
 		try {
-			await this.app.vault.adapter.write(normalizePath(this.cacheDir + "/" + cacheKey), JSON.stringify(summary));
+			await this.app.vault.adapter.write(
+				normalizePath(this.cacheDir + "/" + cacheKey),
+				JSON.stringify(summary)
+			);
 		} catch (e) {
-			console.error("WakaTime box: Error saving WakaTime summary to cache: " + e);
+			console.error(
+				"WakaTime box: Error saving WakaTime summary to cache: " + e
+			);
 		}
 	}
 
@@ -277,16 +427,27 @@ class SummaryDataFetcher {
 			this.saveToCache(date, summary);
 			return summary;
 		} catch (error) {
-			console.error("WakaTime box: error requesting WakaTime summary: " + error);
-			new Notice('WakaTime box: error requesting WakaTime summary: ' + error, 5000);
+			console.error(
+				"WakaTime box: error requesting WakaTime summary: " + error
+			);
+			new Notice(
+				"WakaTime box: error requesting WakaTime summary: " + error,
+				5000
+			);
 			return undefined;
 		}
 	}
 
 	// read cache or fetch data from wakatime
-	async requestWakaTimeSummary(apiKey: String, date: string, force: boolean, callback: (summary: Summary | undefined, fromCache: boolean) => void) {
-		const baseUrl = "https://wakatime.com/api/v1/users/current/summaries"
-		const url = baseUrl + "?start=" + date + "&end=" + date + "&api_key=" + apiKey;
+	async requestWakaTimeSummary(
+		apiKey: String,
+		date: string,
+		force: boolean,
+		callback: (summary: Summary | undefined, fromCache: boolean) => void
+	) {
+		const baseUrl = "https://wakatime.com/api/v1/users/current/summaries";
+		const url =
+			baseUrl + "?start=" + date + "&end=" + date + "&api_key=" + apiKey;
 		try {
 			if (force) {
 				const result = await this.fetchViaAPI(url, date);
@@ -302,12 +463,16 @@ class SummaryDataFetcher {
 			const apiResult = await this.fetchViaAPI(url, date);
 			callback(apiResult, false);
 		} catch (e) {
-			console.error("WakaTime box: error requesting WakaTime summary: " + e);
-			new Notice('WakaTime box: error requesting WakaTime summary: ' + e, 5000);
+			console.error(
+				"WakaTime box: error requesting WakaTime summary: " + e
+			);
+			new Notice(
+				"WakaTime box: error requesting WakaTime summary: " + e,
+				5000
+			);
 			callback(undefined, false);
 		}
 	}
-
 }
 
 class WakaBoxSettingTab extends PluginSettingTab {
@@ -323,16 +488,139 @@ class WakaBoxSettingTab extends PluginSettingTab {
 
 		containerEl.empty();
 
-		new Setting(containerEl)
-			.setName('WakaTime API key')
-			.addText(text => text
+		new Setting(containerEl).setName("WakaTime API key").addText((text) =>
+			text
 				.setValue(this.plugin.settings.apiKey)
-				.setPlaceholder('Enter your API key')
+				.setPlaceholder("Enter your API key")
 				.onChange(async (value) => {
 					this.plugin.settings.apiKey = value;
 					await this.plugin.saveSettings();
 					this.plugin.onGetAPIKey();
-				}));
+				})
+		);
+
+		/* add for multi-devices */
+		new Setting(containerEl)
+			.setName("Enable Daily Batch Mode")
+			.setDesc("Only update notes once per day")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.enableDailyBatchMode)
+					.onChange(async (value) => {
+						this.plugin.settings.enableDailyBatchMode = value;
+						await this.plugin.saveSettings();
+						this.toggleVisibility(
+							value,
+							IntervalContainer,
+							DailyBatchContainer
+						);
+					})
+			);
+
+		// BatchModeの説明文を追加
+		const descriptionEl = containerEl.createEl("p", {
+			text: "When Batch Mode is ON, the plugin updates at the specified time. When OFF, it updates at the specified interval.",
+		});
+		descriptionEl.style.marginTop = "10px";
+		descriptionEl.style.marginBottom = "10px";
+		descriptionEl.style.color = "var(--text-muted)";
+
+		// 罫線を追加
+		containerEl.createEl("hr");
+
+		// バッチモードの有効/無効に応じて時刻設定を制御
+		const IntervalContainer = containerEl.createDiv();
+		IntervalContainer.addClass("wakabox-time-setting");
+		const DailyBatchContainer = containerEl.createDiv();
+		DailyBatchContainer.addClass("wakabox-time-setting");
+		this.toggleVisibility(
+			this.plugin.settings.enableDailyBatchMode,
+			IntervalContainer,
+			DailyBatchContainer
+		);
+
+		this.createNumberInputSetting(
+			IntervalContainer,
+			"Update Interval (minutes)",
+			"How often to update WakaTime data, in minutes (60-1440)",
+			this.plugin.settings.updateIntervalMinutes,
+			60,
+			1440,
+			async (value) => {
+				this.plugin.settings.updateIntervalMinutes = value;
+				await this.plugin.saveSettings();
+			}
+		);
+
+		this.createNumberInputSetting(
+			DailyBatchContainer,
+			"Batch Update Hour",
+			"Hour to update WakaTime data (0-23)",
+			this.plugin.settings.batchUpdateHours,
+			0,
+			23,
+			async (value) => {
+				this.plugin.settings.batchUpdateHours = value;
+				await this.plugin.saveSettings();
+			}
+		);
+
+		this.createNumberInputSetting(
+			DailyBatchContainer,
+			"Batch Update Minute",
+			"Minute to update WakaTime data (0-59)",
+			this.plugin.settings.batchUpdateMinutes,
+			0,
+			59,
+			async (value) => {
+				this.plugin.settings.batchUpdateMinutes = value;
+				await this.plugin.saveSettings();
+			}
+		);
+	}
+
+	private toggleVisibility(
+		enableBatchMode: boolean,
+		intervalContainer: HTMLElement,
+		dailyBatchContainer: HTMLElement
+	) {
+		intervalContainer.style.display = enableBatchMode ? "none" : "block";
+		dailyBatchContainer.style.display = enableBatchMode ? "block" : "none";
+	}
+
+	private createNumberInputSetting(
+		container: HTMLElement,
+		name: string,
+		description: string,
+		initialValue: number,
+		min: number,
+		max: number,
+		onChange: (value: number) => Promise<void>
+	) {
+		new Setting(container)
+			.setName(name)
+			.setDesc(description)
+			.addText((text) => {
+				const inputEl = text.inputEl;
+				inputEl.type = "number";
+				inputEl.min = min.toString();
+				inputEl.max = max.toString();
+				inputEl.value = initialValue.toString();
+				inputEl.style.width = "100px";
+				inputEl.style.fontSize = "1.2em";
+				inputEl.addEventListener("change", async () => {
+					const value = parseInt(inputEl.value, 10);
+					if (!isNaN(value) && value >= min && value <= max) {
+						await onChange(value);
+					} else {
+						new Notice(
+							`Please enter a valid number between ${min} and ${max}.`,
+							3000
+						);
+						inputEl.value = initialValue.toString();
+					}
+				});
+			});
 	}
 }
 
@@ -356,19 +644,19 @@ export class ManualModal extends Modal {
 				const date = moment().format("YYYY-MM-DD");
 				text.setValue(date);
 				text.onChange((value) => {
-					this.result = value
-				})
+					this.result = value;
+				});
 			});
 
-		new Setting(contentEl)
-			.addButton((btn) =>
-				btn
-					.setButtonText("Submit")
-					.setCta()
-					.onClick(() => {
-						this.close();
-						this.onResult(this.result);
-					}));
+		new Setting(contentEl).addButton((btn) =>
+			btn
+				.setButtonText("Submit")
+				.setCta()
+				.onClick(() => {
+					this.close();
+					this.onResult(this.result);
+				})
+		);
 	}
 
 	onClose() {
